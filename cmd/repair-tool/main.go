@@ -25,6 +25,7 @@ type Args struct {
 	PrivateKey     string `arg:"required"`
 	OrgID          string `arg:"required"`
 	StateProjectID string `arg:"required"`
+	Canary         bool
 }
 
 var args Args
@@ -32,7 +33,7 @@ var args Args
 type InstanceData struct {
 	Name         string
 	DashboardURL string
-	Template     string
+	ParsedPlan   dynamicplans.Plan
 }
 
 func readData() (map[string]InstanceData, error) {
@@ -52,12 +53,15 @@ func readData() (map[string]InstanceData, error) {
 
 	result := map[string]InstanceData{}
 
+	logrus.Infof("Rebuilding state from backup data")
+	total := 0
+	missing := 0
 	for app, values := range mapping {
 		if app == originalApp {
 			continue
 		}
 
-		for uuid, _ := range values {
+		for uuid := range values {
 			filename := path.Join("backup/service_instances", uuid+".json")
 			contents, err := ioutil.ReadFile(filename)
 			if err != nil {
@@ -73,6 +77,7 @@ func readData() (map[string]InstanceData, error) {
 
 			if errorCode, ok := contentsParsed["error_code"]; ok {
 				logrus.Errorf("Instance query returned error: %q, skipping!", errorCode)
+				missing++
 				continue
 			}
 
@@ -100,6 +105,14 @@ func readData() (map[string]InstanceData, error) {
 			planEntity := planContentsParsed["entity"].(map[string]interface{})
 			extra := planEntity["extra"]
 
+			// https://cloud.mongodb.com/v2/projectId#clusters/detail/clusterName
+			u, err := url.Parse(entity["dashboard_url"].(string))
+			if err != nil {
+				logrus.Fatal(err)
+			}
+
+			projectID := path.Base(u.Path)
+
 			planExtra := map[string]interface{}{}
 			err = json.Unmarshal([]byte(extra.(string)), &planExtra)
 			if err != nil {
@@ -113,27 +126,43 @@ func readData() (map[string]InstanceData, error) {
 					"keyByAlias": func(interface{}, string) string { return "" },
 				}).
 				Parse(planExtra["template"].(string))
+			if err != nil {
+				logrus.Fatal(err)
+			}
+
+			parsedTemplate := new(bytes.Buffer)
+
+			err = t.Execute(parsedTemplate, map[string]string{
+				"instance_name": entity["name"].(string),
+			})
+			if err != nil {
+				logrus.Fatal(err)
+			}
+
+			dp := dynamicplans.Plan{}
+			err = yaml.NewDecoder(parsedTemplate).Decode(&dp)
+			if err != nil {
+				logrus.Fatal(err)
+			}
+
+			dp.Project.ID = projectID
+			dp.Project.OrgID = args.OrgID
+			dp.APIKey = nil
 
 			result[uuid] = InstanceData{
 				Name:         entity["name"].(string),
 				DashboardURL: entity["dashboard_url"].(string),
-				Template:     planExtra["template"].(string),
+				ParsedPlan:   dp,
 			}
+
+			logrus.Infof("Built data for %s: %s", uuid, dp)
+			total++
 		}
 	}
 
-	return id, err
-}
+	logrus.Infof("Build data for %d instances in total (%d instances were missing in CF)", total, missing)
 
-func parsePlan(file string) (*template.Template, error) {
-	logrus.Infof("Reading template from %s", file)
-
-	text, err := ioutil.ReadFile(file)
-	if err != nil {
-		return nil, errors.Wrap(err, "cannot read file")
-	}
-
-	return t, err
+	return result, err
 }
 
 func encodePlan(v dynamicplans.Plan) (string, error) {
@@ -226,48 +255,15 @@ func main() {
 
 			dataValue, ok := data[fullValue.Name]
 			if !ok {
-				logrus.Errorf("Null value %s not found in backup data! Continuing anyway...", fullValue.Name)
+				logrus.Errorf("Null value %s not found in backup data (maybe it was deleted from CF). Continuing anyway...", fullValue.Name)
 				continue
 			}
 
-			// https://cloud.mongodb.com/v2/projectId#clusters/detail/clusterName
-			u, err := url.Parse(dataValue.DashboardURL)
-			if err != nil {
-				logrus.Fatal(err)
-			}
-
-			projectID := path.Base(u.Path)
-
-			planContext := dynamicplans.Context{
-				"instance_name": dataValue.Name,
-				"instance_size": dataValue.ClusterTier,
-				"plan_name":     dataValue.PlanName,
-				"disk_type":     dataValue.DiskType,
-				"project_id":    projectID,
-				"org_id":        args.OrgID,
-			}
-
-			logrus.Infof("%s parameters: instance name %q, cluster tier %q, project ID %q", fullValue.Name, dataValue.Name, dataValue.ClusterTier, projectID)
-
-			logrus.Info("Preparing template")
-
-			raw := new(bytes.Buffer)
-			err = planTemplate.Execute(raw, planContext)
-			if err != nil {
-				logrus.Fatal(err)
-			}
-
-			logrus.Info("Parsing plan")
-
-			dp := dynamicplans.Plan{}
-			err = yaml.NewDecoder(raw).Decode(&dp)
-			if err != nil {
-				logrus.Fatal(err)
-			}
+			logrus.Infof("%s parameters: instance name %q, dashboard %q", fullValue.Name, dataValue.Name, dataValue.DashboardURL)
 
 			logrus.Info("Encoding plan")
 
-			planEnc, err := encodePlan(dp)
+			planEnc, err := encodePlan(dataValue.ParsedPlan)
 			if err != nil {
 				logrus.Fatal(err)
 			}
@@ -289,6 +285,13 @@ func main() {
 				Value: vv,
 			}
 
+			logrus.Infof("Deleting original value for %s", fullValue.Name)
+
+			_, err = client.RealmValues.Delete(ctx, args.StateProjectID, a.ID, fullValue.ID)
+			if err != nil {
+				logrus.Fatal(err)
+			}
+
 			logrus.Infof("Creating a copy of %s with fixed data", fullValue.Name)
 
 			_, _, err = client.RealmValues.Create(ctx, args.StateProjectID, a.ID, &fixedValue)
@@ -296,11 +299,9 @@ func main() {
 				logrus.Fatal(err)
 			}
 
-			logrus.Infof("Deleting original value for %s", fullValue.Name)
-
-			_, err = client.RealmValues.Delete(ctx, args.StateProjectID, a.ID, fullValue.ID)
-			if err != nil {
-				logrus.Fatal(err)
+			if args.Canary {
+				logrus.Info("Canary mode enabled - exiting after first state update!")
+				break
 			}
 		}
 	}
