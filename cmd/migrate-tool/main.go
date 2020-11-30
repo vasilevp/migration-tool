@@ -2,10 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"time"
 
 	"github.com/alexflint/go-arg"
 	"github.com/mongodb/atlas-osb/pkg/mongodbrealm"
@@ -63,11 +59,34 @@ func main() {
 		return
 	}
 
+	target := stateApps[0].ID
+	logrus.Infof("Selected %s (%s) as the target state app", target, stateApps[0].ClientAppID)
+
 	logrus.Info("Getting values from apps")
 
-	valueMap := map[string]map[string]mongodbrealm.RealmValue{}
+	totalValues := 0
 
 	for _, a := range stateApps {
+		if a.ID == target {
+			continue
+		}
+
+		logrus.Infof("Counting values in app %s", a.ID)
+		values, _, err := client.RealmValues.List(ctx, args.ProjectID, a.ID, nil)
+		if err != nil {
+			logrus.Fatal(err)
+		}
+
+		totalValues += len(values)
+	}
+
+	processedValues := 0
+
+	for _, a := range stateApps {
+		if a.ID == target {
+			continue
+		}
+
 		logrus.Infof("Getting values from app %s", a.ID)
 		values, _, err := client.RealmValues.List(ctx, args.ProjectID, a.ID, nil)
 		if err != nil {
@@ -76,67 +95,38 @@ func main() {
 
 		logrus.Infof("Got %d values", len(values))
 
-		valueMap[a.ID] = map[string]mongodbrealm.RealmValue{}
+		logrus.Infof("Copying values from %s to %s", a.ID, target)
+
 		for _, v := range values {
 			logrus.Infof("Fetching value %s", v.Name)
 			fullValue, _, err := client.RealmValues.Get(ctx, args.ProjectID, a.ID, v.ID)
 			if err != nil {
 				logrus.Fatal(err)
 			}
-			valueMap[a.ID][v.Name] = *fullValue
-		}
-	}
 
-	fname := fmt.Sprintf("data_backup.%d.json", time.Now().UnixNano())
-
-	logrus.Infof("Saving backup to %s", fname)
-	data, err := json.MarshalIndent(valueMap, "", "\t")
-	if err != nil {
-		logrus.Fatal(err)
-	}
-
-	err = ioutil.WriteFile(fname, data, 0644)
-	if err != nil {
-		logrus.Fatal(err)
-	}
-
-	target := stateApps[0].ID
-	logrus.Infof("Selected %s (%s) as the target state app", target, stateApps[0].ClientAppID)
-
-	for app, values := range valueMap {
-		if app == target {
-			continue
-		}
-
-		logrus.Infof("Copying values from %s to %s", app, target)
-
-		for _, value := range values {
-			if dupl, ok := valueMap[target][value.Name]; ok {
-				logrus.
-					WithField("value_in_duplicate", fmt.Sprintf("https://realm.mongodb.com/groups/%s/apps/%s/values/%s", args.ProjectID, app, value.ID)).
-					WithField("value_in_target", fmt.Sprintf("https://realm.mongodb.com/groups/%s/apps/%s/values/%s", args.ProjectID, target, dupl.ID)).
-					Fatalf("Value with name %s already exists in app ID %s, please confirm and delete by hand", value.Name, target)
-			}
-
-			logrus.Infof("Creating value %s in %s", value.Name, target)
-			_, _, err := client.RealmValues.Create(ctx, args.ProjectID, target, &value)
+			logrus.Infof("Creating value %s in %s", fullValue.Name, target)
+			_, _, err = client.RealmValues.Create(ctx, args.ProjectID, target, fullValue)
 			if err != nil {
 				logrus.Fatal(err)
 			}
 
-			logrus.Infof("Deleting value %s from %s", value.Name, target)
-			_, err = client.RealmValues.Delete(ctx, args.ProjectID, app, value.ID)
+			logrus.Infof("Deleting value %s from %s", fullValue.Name, target)
+			_, err = client.RealmValues.Delete(ctx, args.ProjectID, a.ID, fullValue.ID)
 			if err != nil {
 				logrus.Fatal(err)
 			}
+
+			processedValues++
+
+			logrus.Infof("Processed %d/%d values", processedValues, totalValues)
 		}
 
-		logrus.Infof("Deleting app %s", app)
-		_, err := client.RealmApps.Delete(ctx, args.ProjectID, app)
+		logrus.Infof("Deleting app %s", a.ID)
+		_, err = client.RealmApps.Delete(ctx, args.ProjectID, a.ID)
 		if err != nil {
 			logrus.Fatal(err)
 		}
 	}
 
-	logrus.Infof("Successfully merged Realm Values into app ID %s", target)
+	logrus.Infof("Successfully merged %d Realm Values into app ID %s", processedValues, target)
 }
