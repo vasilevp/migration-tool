@@ -12,6 +12,7 @@ type Args struct {
 	PublicKey  string `arg:"required"`
 	PrivateKey string `arg:"required"`
 	ProjectID  string `arg:"required"`
+	DryRun     bool
 }
 
 var args Args
@@ -104,16 +105,21 @@ func main() {
 				logrus.Fatal(err)
 			}
 
-			logrus.Infof("Creating value %s in %s", fullValue.Name, target)
-			_, _, err = client.RealmValues.Create(ctx, args.ProjectID, target, fullValue)
-			if err != nil {
-				logrus.Fatal(err)
-			}
+			if args.DryRun {
+				logrus.Infof("(DRY RUN) Creating value %s in %s", fullValue.Name, target)
+				logrus.Infof("(DRY RUN) Deleting value %s from %s", fullValue.Name, target)
+			} else {
+				logrus.Infof("Creating value %s in %s", fullValue.Name, target)
+				_, _, err = client.RealmValues.Create(ctx, args.ProjectID, target, fullValue)
+				if err != nil {
+					logrus.Fatal(err)
+				}
 
-			logrus.Infof("Deleting value %s from %s", fullValue.Name, target)
-			_, err = client.RealmValues.Delete(ctx, args.ProjectID, a.ID, fullValue.ID)
-			if err != nil {
-				logrus.Fatal(err)
+				logrus.Infof("Deleting value %s from %s", fullValue.Name, target)
+				_, err = client.RealmValues.Delete(ctx, args.ProjectID, a.ID, fullValue.ID)
+				if err != nil {
+					logrus.Fatal(err)
+				}
 			}
 
 			processedValues++
@@ -121,10 +127,14 @@ func main() {
 			logrus.Infof("Processed %d/%d values", processedValues, totalValues)
 		}
 
-		logrus.Infof("Deleting app %s", a.ID)
-		_, err = client.RealmApps.Delete(ctx, args.ProjectID, a.ID)
-		if err != nil {
-			logrus.Fatal(err)
+		if args.DryRun {
+			logrus.Infof("(DRY RUN) Deleting app %s", a.ID)
+		} else {
+			logrus.Infof("Deleting app %s", a.ID)
+			_, err = client.RealmApps.Delete(ctx, args.ProjectID, a.ID)
+			if err != nil {
+				logrus.Fatal(err)
+			}
 		}
 	}
 
