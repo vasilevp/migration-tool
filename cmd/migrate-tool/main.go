@@ -107,7 +107,7 @@ func main() {
 
 			if args.DryRun {
 				logrus.Infof("(DRY RUN) Creating value %s in %s", fullValue.Name, target)
-				logrus.Infof("(DRY RUN) Deleting value %s from %s", fullValue.Name, target)
+				logrus.Infof("(DRY RUN) Deleting value %s from %s", fullValue.Name, a.ID)
 			} else {
 				logrus.Infof("Creating value %s in %s", fullValue.Name, target)
 				_, _, err = client.RealmValues.Create(ctx, args.ProjectID, target, fullValue)
@@ -115,7 +115,7 @@ func main() {
 					logrus.Fatal(err)
 				}
 
-				logrus.Infof("Deleting value %s from %s", fullValue.Name, target)
+				logrus.Infof("Deleting value %s from %s", fullValue.Name, a.ID)
 				_, err = client.RealmValues.Delete(ctx, args.ProjectID, a.ID, fullValue.ID)
 				if err != nil {
 					logrus.Fatal(err)
