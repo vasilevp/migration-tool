@@ -181,7 +181,13 @@ func main() {
 				case map[string]interface{}:
 					logger.Warnf("Value %s is in old format, converting...", v.Name)
 
-					data, err := json.Marshal(p)
+					var data []byte
+					if plan, ok := p["plan"]; ok {
+						data, err = json.Marshal(plan)
+					} else {
+						data, err = json.Marshal(p)
+					}
+
 					if err != nil {
 						logger.WithError(err).Error("Cannot marshal parameters")
 						continue
